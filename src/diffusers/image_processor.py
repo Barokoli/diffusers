@@ -538,6 +538,11 @@ class VaeImageProcessor(ConfigMixin):
             )
         if not isinstance(image, list):
             image = [image]
+        elif not (isinstance(image, list) and all(isinstance(i, supported_formats) for i in image)):
+            print(image)
+            raise ValueError(
+                f"Input is in incorrect format: {[type(i) for i in image]}. Currently, we only support {', '.join(supported_formats)}"
+            )
 
         if isinstance(image[0], PIL.Image.Image):
             if crops_coords is not None:

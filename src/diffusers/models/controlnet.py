@@ -717,6 +717,7 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 If `return_dict` is `True`, a [`~models.controlnet.ControlNetOutput`] is returned, otherwise a tuple is
                 returned where the first element is the sample tensor.
         """
+        print(f"Controlnet cond input: {controlnet_cond.shape}")
         # check channel order
         channel_order = self.config.controlnet_conditioning_channel_order
 
@@ -798,6 +799,8 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         sample = self.conv_in(sample)
 
         controlnet_cond = self.controlnet_cond_embedding(controlnet_cond)
+        print(f"controlnet cond. shape: {controlnet_cond.shape}")
+        print(f"sample shape: {sample.shape}")
         sample = sample + controlnet_cond
 
         # 3. down
