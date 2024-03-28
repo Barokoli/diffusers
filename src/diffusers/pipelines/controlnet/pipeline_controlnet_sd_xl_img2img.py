@@ -728,15 +728,23 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
 
             # When `image` is a nested list:
             # (e.g. [[canny_image_1, pose_image_1], [canny_image_2, pose_image_2]])
-            elif any(isinstance(i, list) for i in image):
-                raise ValueError("A single batch of multiple conditionings are supported at the moment.")
-            elif len(image) != len(self.controlnet.nets):
+            elif any(isinstance(i, list) and len(i) != len(self.controlnet.nets) for i in image):
+                print(image)
+                for i in image:
+                    print(len(i))
+
+                raise ValueError("Not all input image lists for each batch have the same length as the number of controlnets.")
+            elif not any(isinstance(i, list) for i in image) and len(image) != len(self.controlnet.nets):
                 raise ValueError(
                     f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.nets)} ControlNets."
                 )
 
-            for image_ in image:
-                self.check_image(image_, prompt, prompt_embeds)
+            for image_or_list in image:
+                if isinstance(image_or_list, list):
+                    for image_ in image_or_list:
+                        self.check_image(image_, prompt, prompt_embeds)
+                else:
+                    self.check_image(image_or_list, prompt, prompt_embeds)
         else:
             assert False
 
@@ -859,7 +867,9 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         do_classifier_free_guidance=False,
         guess_mode=False,
     ):
+        print(f"Pre image preprocess shape: ${image}")
         image = self.control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+        print(f"After image preprocess shape: ${image.shape}")
         image_batch_size = image.shape[0]
 
         if image_batch_size == 1:
@@ -876,6 +886,32 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
             image = torch.cat([image] * 2)
 
         return image
+
+    def prepare_control_image_batched(
+        self,
+        images,
+        width,
+        height,
+        device,
+        dtype,
+        do_classifier_free_guidance=False,
+        guess_mode=False,
+    ):
+        batched_conditionings = None
+        for i, image_set in enumerate(images):
+            # print(f"image set {i}: [{(', '.join([str(img.entropy()) for img in image_set]))}]")
+            image_stack = self.control_image_processor.preprocess(image_set, height=height, width=width).to(dtype=dtype, device=device)
+            if batched_conditionings is None:
+                batched_conditionings = torch.empty([0, *image_stack.shape[1:]], dtype=dtype, device=device)
+            batched_conditionings = torch.cat((batched_conditionings, image_stack), dim=0)
+
+        batched_conditionings.to(device=device, dtype=dtype)
+
+        if do_classifier_free_guidance and not guess_mode:
+            batched_conditionings = torch.cat([batched_conditionings] * 2)
+
+        return batched_conditionings
+
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.StableDiffusionImg2ImgPipeline.get_timesteps
     def get_timesteps(self, num_inference_steps, strength, device):
@@ -1389,24 +1425,26 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
             )
             height, width = control_image.shape[-2:]
         elif isinstance(controlnet, MultiControlNetModel):
-            control_images = []
+            # [[c1, c2], [c1, c2]...]
+            control_image = self.prepare_control_image_batched(
+                images=control_image,
+                width=width,
+                height=height,
+                device=device,
+                dtype=controlnet.dtype,
+                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                guess_mode=guess_mode
+            )
 
-            for control_image_ in control_image:
-                control_image_ = self.prepare_control_image(
-                    image=control_image_,
-                    width=width,
-                    height=height,
-                    batch_size=batch_size * num_images_per_prompt,
-                    num_images_per_prompt=num_images_per_prompt,
-                    device=device,
-                    dtype=controlnet.dtype,
-                    do_classifier_free_guidance=self.do_classifier_free_guidance,
-                    guess_mode=guess_mode,
-                )
+            print(f"Conditionings after: {control_image.shape} ({control_image.dtype})")
 
-                control_images.append(control_image_)
-
-            control_image = control_images
+            #     print("after")
+            #     print(control_image_)
+            #     print(control_image_.shape)
+            #
+            #     control_images.append(control_image_)
+            #
+            # control_image = control_images
             height, width = control_image[0].shape[-2:]
         else:
             assert False

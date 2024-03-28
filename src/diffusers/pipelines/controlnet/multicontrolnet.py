@@ -44,7 +44,16 @@ class MultiControlNetModel(ModelMixin):
         guess_mode: bool = False,
         return_dict: bool = True,
     ) -> Union[ControlNetOutput, Tuple]:
+        # print(f"Multi controlnet before {[str(c.shape) for c in controlnet_cond]}")
+        # print(f"zip: {zip(controlnet_cond, conditioning_scale, self.nets)}")
+        # print(f"conditioning size: {len(conditioning_scale)}")
+        #n = int(sample.shape[0] / len(self.nets))
+        #print(f"batchsize: {n}")
+        n = len(self.nets)
+        # controlnet_cond = [controlnet_cond[i * n:(i + 1) * n] for i in range((len(controlnet_cond) + n - 1) // n)]
+        controlnet_cond = [torch.cat([controlnet_cond[i + n*j].unsqueeze(0) for j in range(len(controlnet_cond) // n)]) for i in range(n)]
         for i, (image, scale, controlnet) in enumerate(zip(controlnet_cond, conditioning_scale, self.nets)):
+            # print(f"{i}: {image.shape}, {scale}")
             down_samples, mid_sample = controlnet(
                 sample=sample,
                 timestep=timestep,

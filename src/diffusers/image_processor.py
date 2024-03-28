@@ -495,6 +495,7 @@ class VaeImageProcessor(ConfigMixin):
         if isinstance(image, supported_formats):
             image = [image]
         elif not (isinstance(image, list) and all(isinstance(i, supported_formats) for i in image)):
+            print(image)
             raise ValueError(
                 f"Input is in incorrect format: {[type(i) for i in image]}. Currently, we only support {', '.join(supported_formats)}"
             )
