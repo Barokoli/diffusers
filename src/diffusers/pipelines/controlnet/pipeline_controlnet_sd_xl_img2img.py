@@ -730,9 +730,9 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
             # When `image` is a nested list:
             # (e.g. [[canny_image_1, pose_image_1], [canny_image_2, pose_image_2]])
             elif any(isinstance(i, list) and len(i) != len(self.controlnet.nets) for i in image):
-                print(image)
-                for i in image:
-                    print(len(i))
+                # print(image)
+                # for i in image:
+                #     print(len(i))
 
                 raise ValueError("Not all input image lists for each batch have the same length as the number of controlnets.")
             elif not any(isinstance(i, list) for i in image) and len(image) != len(self.controlnet.nets):
@@ -868,9 +868,9 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         do_classifier_free_guidance=False,
         guess_mode=False,
     ):
-        print(f"Pre image preprocess shape: ${image}")
+        # print(f"Pre image preprocess shape: ${image}")
         image = self.control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
-        print(f"After image preprocess shape: ${image.shape}")
+        # print(f"After image preprocess shape: ${image.shape}")
         image_batch_size = image.shape[0]
 
         if image_batch_size == 1:
@@ -1458,7 +1458,7 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
                 guess_mode=guess_mode
             )
 
-            print(f"Conditionings after: {control_image.shape} ({control_image.dtype})")
+            # print(f"Conditionings after: {control_image.shape} ({control_image.dtype})")
 
             #     print("after")
             #     print(control_image_)
