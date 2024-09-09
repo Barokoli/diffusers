@@ -69,6 +69,21 @@ class MultiControlNetModel(ModelMixin):
                 return_dict=return_dict,
             )
 
+            # measure variance
+            for j, layer in enumerate(down_samples):
+                var = torch.var(layer, dim=(1, 2, 3))
+                # logger.warning(f"Variance [{j}]: {var.shape} -> {var}")
+                norm = torch.nn.functional.normalize(torch.var(layer, dim=(1, 2, 3)), dim=0)
+                # logger.warning(f"Norm [{j}]: {norm.shape} -> {norm}")
+                # logger.warning(f"layer: {layer.shape}")
+                shape = list(layer.shape)
+                shape[0] = 1
+                unsqueezer = [1] * len(shape)
+                unsqueezer[0] = norm.shape[0]
+                factor = 0.7
+                down_samples[j] = layer * norm.reshape(unsqueezer).repeat(shape) * factor + layer * (1.0 - factor)
+
+
             # merge samples
             if i == 0:
                 down_block_res_samples, mid_block_res_sample = down_samples, mid_sample

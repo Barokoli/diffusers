@@ -14,6 +14,7 @@
 
 
 import inspect
+import json
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -66,6 +67,7 @@ from .multicontrolnet import MultiControlNetModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 
 EXAMPLE_DOC_STRING = """
@@ -1007,18 +1009,29 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         negative_target_size,
         dtype,
         text_encoder_projection_dim=None,
+        repeat=1
     ):
+
+        multi_crop = isinstance(crops_coords_top_left, list) and isinstance(crops_coords_top_left[0], (list, tuple))
+
         if self.config.requires_aesthetics_score:
             add_time_ids = list(original_size + crops_coords_top_left + (aesthetic_score,))
             add_neg_time_ids = list(
                 negative_original_size + negative_crops_coords_top_left + (negative_aesthetic_score,)
             )
         else:
-            add_time_ids = list(original_size + crops_coords_top_left + target_size)
-            add_neg_time_ids = list(negative_original_size + crops_coords_top_left + negative_target_size)
+            logger.warning(
+                f"original:{json.dumps(original_size)}\ncrops:{json.dumps(crops_coords_top_left)},\ntarget_size:{json.dumps(target_size)}"
+            )
+            if multi_crop:
+                add_time_ids = [list(original_size) + list(crop) + list(target_size) for crop in crops_coords_top_left]
+                add_neg_time_ids = [list(negative_original_size) + list(crop) + list(negative_target_size) for crop in crops_coords_top_left]
+            else:
+                add_time_ids = list(original_size + crops_coords_top_left + target_size)
+                add_neg_time_ids = list(negative_original_size + crops_coords_top_left + negative_target_size)
 
         passed_add_embed_dim = (
-            self.unet.config.addition_time_embed_dim * len(add_time_ids) + text_encoder_projection_dim
+            self.unet.config.addition_time_embed_dim * (len(add_time_ids[0]) if multi_crop else len(add_time_ids)) + text_encoder_projection_dim
         )
         expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
 
@@ -1497,6 +1510,8 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
         else:
             text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
 
+        multi_crops = isinstance(crops_coords_top_left, list) and isinstance(crops_coords_top_left[0], (list, tuple))
+
         add_time_ids, add_neg_time_ids = self._get_add_time_ids(
             original_size,
             crops_coords_top_left,
@@ -1508,13 +1523,16 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
             negative_target_size,
             dtype=prompt_embeds.dtype,
             text_encoder_projection_dim=text_encoder_projection_dim,
+            repeat=batch_size*num_images_per_prompt
         )
-        add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+        if not multi_crops:
+            add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
 
         if self.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+            if not multi_crops:
+                add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
             add_time_ids = torch.cat([add_neg_time_ids, add_time_ids], dim=0)
 
         prompt_embeds = prompt_embeds.to(device)
@@ -1554,6 +1572,8 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
                         controlnet_cond_scale = controlnet_cond_scale[0]
                     cond_scale = controlnet_cond_scale * controlnet_keep[i]
 
+                # logger.warning(f"Controlnet img shape: {control_image.shape}")
+
                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                     control_model_input,
                     t,
@@ -1564,6 +1584,9 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
                     added_cond_kwargs=controlnet_added_cond_kwargs,
                     return_dict=False,
                 )
+
+                # logger.warning(f"Controlnet signals: down ({'; '.join([str(sample.shape) for sample in down_block_res_samples])}, "
+                #                f"mid ({'; '.join([str(sample.shape) for sample in mid_block_res_sample])}))")
 
                 if guess_mode and self.do_classifier_free_guidance:
                     # Infered ControlNet only for the conditional batch.

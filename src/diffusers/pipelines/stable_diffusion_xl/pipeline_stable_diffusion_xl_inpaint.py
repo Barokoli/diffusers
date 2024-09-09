@@ -1519,6 +1519,7 @@ class StableDiffusionXLInpaintPipeline(
             resize_mode = "default"
 
         original_image = image
+
         init_image = self.image_processor.preprocess(
             image, height=height, width=width, crops_coords=crops_coords, resize_mode=resize_mode
         )
@@ -1563,6 +1564,8 @@ class StableDiffusionXLInpaintPipeline(
             latents, noise, image_latents = latents_outputs
         else:
             latents, noise = latents_outputs
+
+        print(f"Latents: {latents.shape}")
 
         # 7. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
@@ -1694,6 +1697,7 @@ class StableDiffusionXLInpaintPipeline(
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 if num_channels_unet == 9:
+                    print(f"1: {latent_model_input.shape},2 {mask.shape}, 3 {masked_image_latents.shape}")
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
                 # predict the noise residual
