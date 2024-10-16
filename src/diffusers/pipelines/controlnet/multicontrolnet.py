@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from itertools import compress
 
 from ...models.controlnet import ControlNetModel, ControlNetOutput
 from ...models.modeling_utils import ModelMixin
@@ -28,6 +29,20 @@ class MultiControlNetModel(ModelMixin):
     def __init__(self, controlnets: Union[List[ControlNetModel], Tuple[ControlNetModel]]):
         super().__init__()
         self.nets = nn.ModuleList(controlnets)
+        self.control_disable = [True] * len(controlnets)
+
+    def num_active_controlnets(self) -> int:
+        return sum(self.control_disable)
+
+    def toggle_controlnets(self, flags: list):
+        r"""
+        Disable or enable controlnets by index. Minnimum one needs to be active else
+        raises ValueError.
+        """
+        if len(self.control_disable) != len(flags):
+            raise ValueError(f"One value per controlnet expected ({len(self.control_disable)}), got {len(flags)}.")
+        self.control_disable = flags
+        flags.index(True)  # Raise Value error if none are active
 
     def forward(
         self,
@@ -52,8 +67,10 @@ class MultiControlNetModel(ModelMixin):
         n = len(self.nets)
         # controlnet_cond = [controlnet_cond[i * n:(i + 1) * n] for i in range((len(controlnet_cond) + n - 1) // n)]
         controlnet_cond = [torch.cat([controlnet_cond[i + n*j].unsqueeze(0) for j in range(len(controlnet_cond) // n)]) for i in range(n)]
-        for i, (image, scale, controlnet) in enumerate(zip(controlnet_cond, conditioning_scale, self.nets)):
-            # print(f"{i}: {image.shape}, {scale}")
+        down_block_res_samples, mid_block_res_sample = (None, None)
+        for i, (image, scale, controlnet) in enumerate(zip(controlnet_cond,
+                                                           compress(conditioning_scale, self.control_disable),
+                                                           compress(self.nets, self.control_disable))):
             down_samples, mid_sample = controlnet(
                 sample=sample,
                 timestep=timestep,
@@ -68,6 +85,26 @@ class MultiControlNetModel(ModelMixin):
                 guess_mode=guess_mode,
                 return_dict=return_dict,
             )
+            # print(f"{i}: {image.shape}, {scale}, [{','.join([str(layer.shape) for layer in down_samples])}]")
+            #
+            # if i == 0:
+            #
+            #     def gen_mask(shape):
+            #         mask_p = torch.ones((1, *shape[1:]), dtype=down_samples[j].dtype,
+            #                             device=down_samples[j].device)
+            #         mask_n = torch.zeros((1, *shape[1:]), dtype=down_samples[j].dtype,
+            #                              device=down_samples[j].device)
+            #         return torch.cat([mask_p if (i % 6) > 3 else mask_n for i in range(shape[0])], dim=0)
+            #
+            #     for j, layer in enumerate(down_samples):
+            #         mask = gen_mask(layer.shape)
+            #         down_samples[j] = mask * layer
+            #
+            #     # for j, layer in enumerate(down_samples):
+            #     #     down_samples[j] = 0 * down_samples[j]
+            #
+            #     mid_sample = gen_mask(mid_sample.shape) * mid_sample
+
 
             # # measure variance
             # for j, layer in enumerate(down_samples):
@@ -97,9 +134,8 @@ class MultiControlNetModel(ModelMixin):
             # factor = 1
             # #mid_sample = mid_sample * norm.reshape(unsqueezer).repeat(shape)
 
-
             # merge samples
-            if i == 0:
+            if mid_block_res_sample is None:
                 down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
             else:
                 down_block_res_samples = [

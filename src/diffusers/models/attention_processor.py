@@ -4133,13 +4133,14 @@ class PAGIdentitySelfAttnProcessor2_0:
         return hidden_states
 
 
-class PAGCFGIdentitySelfAttnProcessor2_0:
+class PAGCFGIdentitySelfAttnProcessor2_0(torch.nn.Module):
     r"""
     Processor for implementing PAG using scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
     PAG reference: https://arxiv.org/abs/2403.17377
     """
 
     def __init__(self):
+        super().__init__()
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError(
                 "PAGCFGIdentitySelfAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0."
