@@ -1,14 +1,15 @@
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from PIL.Image import Image, fromarray
 import torch
 from torch import nn
 from itertools import compress
+import numpy as np
 
 from ...models.controlnet import ControlNetModel, ControlNetOutput
 from ...models.modeling_utils import ModelMixin
 from ...utils import logging
-
 
 logger = logging.get_logger(__name__)
 
@@ -30,6 +31,7 @@ class MultiControlNetModel(ModelMixin):
         super().__init__()
         self.nets = nn.ModuleList(controlnets)
         self.control_disable = [True] * len(controlnets)
+        self.control_mask_flags = [False] * len(controlnets)
 
     def num_active_controlnets(self) -> int:
         return sum(self.control_disable)
@@ -43,6 +45,34 @@ class MultiControlNetModel(ModelMixin):
             raise ValueError(f"One value per controlnet expected ({len(self.control_disable)}), got {len(flags)}.")
         self.control_disable = flags
         flags.index(True)  # Raise Value error if none are active
+
+    def load_control_mask(self, mask_img: List[Image] | Image, influence: List[bool], image_size: [int, int],
+                          batch_size: int, device: torch.device):
+        self.control_mask_flags = influence
+        self.control_mask_cascades = {}
+
+        for cascade in [8, 16, 32]:
+            cascade_size = [image_size[0] // cascade, image_size[1] // cascade]
+            self.control_mask_cascades[cascade_size[1]] = self.generate_cascade(mask_img, cascade_size, batch_size, device)
+
+    def generate_cascade(self, mask_img: List[Image] | Image, size: [int, int], batch_size: int, device: torch.device):
+        res = None
+        if not isinstance(mask_img, list):
+            mask_img = [mask_img]
+        for batch in range(batch_size):
+            mask = (1 - torch.tensor(
+                np.array(mask_img[batch].convert('L').resize(size), dtype=np.uint8).astype(np.float16) / 255,
+                device=device).unsqueeze(0))
+            # mask.repeat((2, 1, 1))
+            if res is None:
+                res = mask
+            else:
+                res = torch.cat((res, mask), dim=0)
+
+            if batch == 0:
+                logger.warning(mask)
+        logger.warning(f"Generated cascade: {size[0]}x{size[1]} -> {res.shape}")
+        return res
 
     def forward(
         self,
@@ -62,10 +92,7 @@ class MultiControlNetModel(ModelMixin):
         # print(f"Multi controlnet before {[str(c.shape) for c in controlnet_cond]}")
         # print(f"zip: {zip(controlnet_cond, conditioning_scale, self.nets)}")
         # print(f"conditioning size: {len(conditioning_scale)}")
-        #n = int(sample.shape[0] / len(self.nets))
-        #print(f"batchsize: {n}")
         n = len(self.nets)
-        # controlnet_cond = [controlnet_cond[i * n:(i + 1) * n] for i in range((len(controlnet_cond) + n - 1) // n)]
         controlnet_cond = [torch.cat([controlnet_cond[i + n*j].unsqueeze(0) for j in range(len(controlnet_cond) // n)]) for i in range(n)]
         down_block_res_samples, mid_block_res_sample = (None, None)
         for i, (image, scale, controlnet) in enumerate(zip(controlnet_cond,
@@ -85,54 +112,19 @@ class MultiControlNetModel(ModelMixin):
                 guess_mode=guess_mode,
                 return_dict=return_dict,
             )
-            # print(f"{i}: {image.shape}, {scale}, [{','.join([str(layer.shape) for layer in down_samples])}]")
-            #
-            # if i == 0:
-            #
-            #     def gen_mask(shape):
-            #         mask_p = torch.ones((1, *shape[1:]), dtype=down_samples[j].dtype,
-            #                             device=down_samples[j].device)
-            #         mask_n = torch.zeros((1, *shape[1:]), dtype=down_samples[j].dtype,
-            #                              device=down_samples[j].device)
-            #         return torch.cat([mask_p if (i % 6) > 3 else mask_n for i in range(shape[0])], dim=0)
-            #
-            #     for j, layer in enumerate(down_samples):
-            #         mask = gen_mask(layer.shape)
-            #         down_samples[j] = mask * layer
-            #
-            #     # for j, layer in enumerate(down_samples):
-            #     #     down_samples[j] = 0 * down_samples[j]
-            #
-            #     mid_sample = gen_mask(mid_sample.shape) * mid_sample
 
+            # print(f"{i}: {image.shape}, {scale}, [{','.join([str(layer.shape) for layer in down_samples])}, "
+            #       f"mid: {mid_sample.shape}]")
 
-            # # measure variance
-            # for j, layer in enumerate(down_samples):
-            #     var = torch.var(layer, dim=(1, 2, 3))
-            #     # logger.warning(f"Variance [{j}]: {var.shape} -> {var}")
-            #     norm = torch.nn.functional.normalize(torch.var(layer, dim=(1, 2, 3)), dim=0)
-            #     # logger.warning(f"Norm [{j}]: {norm.shape} -> {norm}")
-            #     # logger.warning(f"layer: {layer.shape}")
-            #     shape = list(layer.shape)
-            #     shape[0] = 1
-            #     unsqueezer = [1] * len(shape)
-            #     unsqueezer[0] = norm.shape[0]
-            #     factor = 1
-            #     #down_samples[j] = layer * norm.reshape(unsqueezer).repeat(shape)
-            #
-            # logger.warning(f"Mid sample {mid_sample.shape}")
-            #
-            # var = torch.var(mid_sample, dim=(1, 2, 3))
-            # logger.warning(f"Variance [mid]: {var.shape} -> {var}")
-            # norm = torch.nn.functional.normalize(torch.var(mid_sample, dim=(1, 2, 3)), dim=0)
-            # logger.warning(f"Norm [mid]: {norm.shape} -> {norm}")
-            # logger.warning(f"layer: {mid_sample.shape}")
-            # shape = list(mid_sample.shape)
-            # shape[0] = 1
-            # unsqueezer = [1] * len(shape)
-            # unsqueezer[0] = norm.shape[0]
-            # factor = 1
-            # #mid_sample = mid_sample * norm.reshape(unsqueezer).repeat(shape)
+            # [2, 320, 96, 168], [2, 320, 48, 84], [2, 640, 24, 42]
+
+            if self.control_mask_flags[i]:
+                for j, layer in enumerate(down_samples):
+                    mask = self.control_mask_cascades[layer.shape[2]]
+                    down_samples[j] = layer * torch.repeat_interleave(mask.unsqueeze(1), layer.shape[1], 1).repeat((2, 1, 1, 1))
+
+                # mid_sample = gen_mask(mid_sample.shape, mid_sample.dtype, mid_sample.device) * mid_sample
+                mid_sample = mid_sample * torch.repeat_interleave(self.control_mask_cascades[mid_sample.shape[2]].unsqueeze(1), mid_sample.shape[1], 1).repeat((2, 1, 1, 1))
 
             # merge samples
             if mid_block_res_sample is None:
