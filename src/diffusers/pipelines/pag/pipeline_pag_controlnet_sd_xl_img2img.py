@@ -529,6 +529,7 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
         dtype = next(self.image_encoder.parameters()).dtype
 
         if not isinstance(image, torch.Tensor):
+            logger.warning(f"image ({len(image)}): {image}")
             image = self.feature_extractor(image, return_tensors="pt").pixel_values
 
         image = image.to(device=device, dtype=dtype)
@@ -564,6 +565,9 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
                 raise ValueError(
                     f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
                 )
+
+            logger.warning(f"{len(self.unet.encoder_hid_proj.image_projection_layers)} Projection layers.")
+            logger.warning(f"{len(ip_adapter_image)} images.")
 
             for single_ip_adapter_image, image_proj_layer in zip(
                 ip_adapter_image, self.unet.encoder_hid_proj.image_projection_layers
@@ -735,15 +739,20 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
 
             # When `image` is a nested list:
             # (e.g. [[canny_image_1, pose_image_1], [canny_image_2, pose_image_2]])
-            elif any(isinstance(i, list) for i in image):
-                raise ValueError("A single batch of multiple conditionings are supported at the moment.")
-            elif len(image) != len(self.controlnet.nets):
+            elif any(isinstance(i, list) and len(i) != len(self.controlnet.nets) for i in image):
+                raise ValueError(
+                    "Not all input image lists for each batch have the same length as the number of controlnets.")
+            elif not any(isinstance(i, list) for i in image) and len(image) != len(self.controlnet.nets):
                 raise ValueError(
                     f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.nets)} ControlNets."
                 )
 
-            for image_ in image:
-                self.check_image(image_, prompt, prompt_embeds)
+            for image_or_list in image:
+                if isinstance(image_or_list, list):
+                    for image_ in image_or_list:
+                        self.check_image(image_, prompt, prompt_embeds)
+                else:
+                    self.check_image(image_or_list, prompt, prompt_embeds)
         else:
             assert False
 
@@ -884,6 +893,32 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
 
         return image
 
+    def prepare_control_image_batched(
+            self,
+            images,
+            width,
+            height,
+            device,
+            dtype,
+            do_classifier_free_guidance=False,
+            guess_mode=False,
+    ):
+        batched_conditionings = None
+        for i, image_set in enumerate(images):
+            # print(f"image set {i}: [{(', '.join([str(img.entropy()) for img in image_set]))}]")
+            image_stack = self.control_image_processor.preprocess(image_set, height=height, width=width).to(dtype=dtype,
+                                                                                                            device=device)
+            if batched_conditionings is None:
+                batched_conditionings = torch.empty([0, *image_stack.shape[1:]], dtype=dtype, device=device)
+            batched_conditionings = torch.cat((batched_conditionings, image_stack), dim=0)
+
+        batched_conditionings.to(device=device, dtype=dtype)
+
+        if do_classifier_free_guidance and not guess_mode:
+            batched_conditionings = torch.cat([batched_conditionings] * 2)
+
+        return batched_conditionings
+
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.StableDiffusionImg2ImgPipeline.get_timesteps
     def get_timesteps(self, num_inference_steps, strength, device):
         # get the original timestep using init_timestep
@@ -995,19 +1030,30 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
         negative_crops_coords_top_left,
         negative_target_size,
         dtype,
-        text_encoder_projection_dim=None,
+        text_encoder_projection_dim=None
     ):
+        multi_crop = isinstance(crops_coords_top_left, list) and isinstance(crops_coords_top_left[0], (list, tuple))
+
         if self.config.requires_aesthetics_score:
             add_time_ids = list(original_size + crops_coords_top_left + (aesthetic_score,))
             add_neg_time_ids = list(
                 negative_original_size + negative_crops_coords_top_left + (negative_aesthetic_score,)
             )
         else:
-            add_time_ids = list(original_size + crops_coords_top_left + target_size)
-            add_neg_time_ids = list(negative_original_size + crops_coords_top_left + negative_target_size)
+            # logger.warning(
+            #     f"original:{json.dumps(original_size)}\ncrops:{json.dumps(crops_coords_top_left)},\ntarget_size:{json.dumps(target_size)}"
+            # )
+            if multi_crop:
+                add_time_ids = [list(original_size) + list(crop) + list(target_size) for crop in crops_coords_top_left]
+                add_neg_time_ids = [list(negative_original_size) + list(crop) + list(negative_target_size) for crop in
+                                    crops_coords_top_left]
+            else:
+                add_time_ids = list(original_size + crops_coords_top_left + target_size)
+                add_neg_time_ids = list(negative_original_size + crops_coords_top_left + negative_target_size)
 
         passed_add_embed_dim = (
-            self.unet.config.addition_time_embed_dim * len(add_time_ids) + text_encoder_projection_dim
+                self.unet.config.addition_time_embed_dim * (
+            len(add_time_ids[0]) if multi_crop else len(add_time_ids)) + text_encoder_projection_dim
         )
         expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
 
@@ -1404,24 +1450,17 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
             )
             height, width = control_image.shape[-2:]
         elif isinstance(controlnet, MultiControlNetModel):
-            control_images = []
+            # [[c1, c2], [c1, c2]...]
+            control_image = self.prepare_control_image_batched(
+                images=control_image,
+                width=width,
+                height=height,
+                device=device,
+                dtype=controlnet.dtype,
+                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                guess_mode=guess_mode
+            )
 
-            for control_image_ in control_image:
-                control_image_ = self.prepare_control_image(
-                    image=control_image_,
-                    width=width,
-                    height=height,
-                    batch_size=batch_size * num_images_per_prompt,
-                    num_images_per_prompt=num_images_per_prompt,
-                    device=device,
-                    dtype=controlnet.dtype,
-                    do_classifier_free_guidance=self.do_classifier_free_guidance,
-                    guess_mode=False,
-                )
-
-                control_images.append(control_image_)
-
-            control_image = control_images
             height, width = control_image[0].shape[-2:]
         else:
             assert False
@@ -1475,6 +1514,8 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
         else:
             text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
 
+        multi_crops = isinstance(crops_coords_top_left, list) and isinstance(crops_coords_top_left[0], (list, tuple))
+
         add_time_ids, add_neg_time_ids = self._get_add_time_ids(
             original_size,
             crops_coords_top_left,
@@ -1485,10 +1526,11 @@ class StableDiffusionXLControlNetPAGImg2ImgPipeline(
             negative_crops_coords_top_left,
             negative_target_size,
             dtype=prompt_embeds.dtype,
-            text_encoder_projection_dim=text_encoder_projection_dim,
+            text_encoder_projection_dim=text_encoder_projection_dim
         )
-        add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
-        add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+        if not multi_crops:
+            add_time_ids = add_time_ids.repeat(batch_size * num_images_per_prompt, 1)
+            add_neg_time_ids = add_neg_time_ids.repeat(batch_size * num_images_per_prompt, 1)
 
         control_images = control_image if isinstance(control_image, list) else [control_image]
         for i, single_image in enumerate(control_images):

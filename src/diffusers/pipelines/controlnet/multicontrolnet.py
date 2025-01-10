@@ -30,8 +30,8 @@ class MultiControlNetModel(ModelMixin):
     def __init__(self, controlnets: Union[List[ControlNetModel], Tuple[ControlNetModel]]):
         super().__init__()
         self.nets = nn.ModuleList(controlnets)
-        self.control_disable = [True] * len(controlnets)
-        self.control_mask_flags = [False] * len(controlnets)
+        self.control_disable = [True] * len(controlnets)  # enable or disable controlnet
+        self.control_mask_flags = [0.0] * len(controlnets)  # mask strength on controlnet
 
     def num_active_controlnets(self) -> int:
         return sum(self.control_disable)
@@ -46,7 +46,7 @@ class MultiControlNetModel(ModelMixin):
         self.control_disable = flags
         flags.index(True)  # Raise Value error if none are active
 
-    def load_control_mask(self, mask_img: List[Image] | Image, influence: List[bool], image_size: [int, int],
+    def load_control_mask(self, mask_img: List[Image] | Image, influence: List[float], image_size: [int, int],
                           batch_size: int, device: torch.device):
         self.control_mask_flags = influence
         self.control_mask_cascades = {}
@@ -69,9 +69,9 @@ class MultiControlNetModel(ModelMixin):
             else:
                 res = torch.cat((res, mask), dim=0)
 
-            if batch == 0:
-                logger.warning(mask)
-        logger.warning(f"Generated cascade: {size[0]}x{size[1]} -> {res.shape}")
+            # if batch == 0:
+            #     logger.warning(mask)
+        # logger.warning(f"Generated cascade: {size[0]}x{size[1]} -> {res.shape}")
         return res
 
     def forward(
@@ -118,9 +118,14 @@ class MultiControlNetModel(ModelMixin):
 
             # [2, 320, 96, 168], [2, 320, 48, 84], [2, 640, 24, 42]
 
-            if self.control_mask_flags[i]:
+            if abs(self.control_mask_flags[i]) > 0.001:
                 for j, layer in enumerate(down_samples):
-                    mask = self.control_mask_cascades[layer.shape[2]]
+                    if self.control_mask_flags[i] > 0:
+                        mask = self.control_mask_cascades[layer.shape[2]] * self.control_mask_flags[i] + (
+                                1.0 - self.control_mask_flags[i])
+                    else:
+                        mask = (1.0 - self.control_mask_cascades[layer.shape[2]]) * abs(self.control_mask_flags[i]) + (
+                                1.0 - abs(self.control_mask_flags[i]))
                     down_samples[j] = layer * torch.repeat_interleave(mask.unsqueeze(1), layer.shape[1], 1).repeat((2, 1, 1, 1))
 
                 # mid_sample = gen_mask(mid_sample.shape, mid_sample.dtype, mid_sample.device) * mid_sample

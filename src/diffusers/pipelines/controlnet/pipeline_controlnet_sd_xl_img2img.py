@@ -739,7 +739,7 @@ class StableDiffusionXLControlNetImg2ImgPipeline(
                 raise ValueError("Not all input image lists for each batch have the same length as the number of controlnets.")
             elif not any(isinstance(i, list) for i in image) and len(image) != self.controlnet.num_active_controlnets():
                 raise ValueError(
-                    f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.num_active_controlnets())} ControlNets."
+                    f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {self.controlnet.num_active_controlnets()} ControlNets."
                 )
 
             for (image_or_list, enabled) in zip(image, self.controlnet.control_disable):
